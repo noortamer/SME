@@ -50,25 +50,26 @@ for col in columns_to_normalize:
 
 size_column = 'فئة_SME'
 
-#normalize data within each year AND each company size group
+#normalize data within each year AND each company size group AND each sector
 for year in df['السنة'].unique():
     for size in df[size_column].unique():
-        #create a boolean mask for the current year and company size segment
-        mask = (df['السنة'] == year) & (df[size_column] == size)
-        
-        #check if the filtered segment is not empty
-        if not df.loc[mask].empty:
-            for col in columns_to_normalize:
-                min_val = df.loc[mask, col].min()
-                max_val = df.loc[mask, col].max()
-                range_val = max_val - min_val
-                
-                if range_val > 0:
-                    #apply min-max normalization
-                    df.loc[mask, f"{col}_normalized"] = (df.loc[mask, col] - min_val) / range_val
-                else:
-                    #all values in the segment are the same then value = 0
-                    df.loc[mask, f"{col}_normalized"] = 0
+        for sector in df['القطاع'].unique():
+            #create a boolean mask for the current year, company size segment, and sector
+            mask = (df['السنة'] == year) & (df[size_column] == size) & (df['القطاع'] == sector)
+            
+            #check if the filtered segment is not empty
+            if not df.loc[mask].empty:
+                for col in columns_to_normalize:
+                    min_val = df.loc[mask, col].min()
+                    max_val = df.loc[mask, col].max()
+                    range_val = max_val - min_val
+                    
+                    if range_val > 0:
+                        #apply min-max normalization
+                        df.loc[mask, f"{col}_normalized"] = (df.loc[mask, col] - min_val) / range_val
+                    else:
+                        #all values in the segment are the same then value = 0
+                        df.loc[mask, f"{col}_normalized"] = 0
 
 #calculate the final weighted score
 def calculate_normalized_score(row):
