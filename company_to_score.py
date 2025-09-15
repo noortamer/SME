@@ -1,8 +1,10 @@
 import pandas as pd
 
+# Load the data from the specified file path
 file_path = r"data\مؤشرات_الشركة_سنوياً_ar.csv"
 df = pd.read_csv(file_path)
 
+# Define the weights for different sectors
 weights = {
     "الزراعة والحراجة وصيد الأسماك": [0.12, 0.10, 0.20, 0.08, 0.20, 0.20, 0.10],
     "التعدين واستغلال المحاجر": [0.18, 0.10, 0.12, 0.06, 0.18, 0.28, 0.08],
@@ -27,13 +29,12 @@ weights = {
     "أنشطة المنظمات والهيئات خارج الإقليم": [0.18, 0.06, 0.12, 0.06, 0.24, 0.26, 0.08],
 }
 
-#normalize the weights to ensure sum = 1
+#normalize the weights to ensure their sum = 1
 for sector in weights:
     total_weight = sum(weights[sector])
     if total_weight > 0:
         weights[sector] = [w / total_weight for w in weights[sector]]
 
-#columns that correspond to the weights
 columns_to_normalize = [
     "المبيعات_جنيه",
     "الإيرادات_جنيه",
@@ -44,23 +45,32 @@ columns_to_normalize = [
     "branches",
 ]
 
-#Create new columns for the normalized data
 for col in columns_to_normalize:
     df[f"{col}_normalized"] = 0.0
 
-#Normalize data within each year
-for year in df['السنة'].unique():
-    year_mask = df['السنة'] == year
-    for col in columns_to_normalize:
-        min_val = df.loc[year_mask, col].min()
-        max_val = df.loc[year_mask, col].max()
-        range_val = max_val - min_val
-        if range_val > 0:
-            df.loc[year_mask, f"{col}_normalized"] = (df.loc[year_mask, col] - min_val) / range_val
-        else:
-            # If all values in the year are the same, normalized value is 0
-            df.loc[year_mask, f"{col}_normalized"] = 0
+size_column = 'فئة_SME'
 
+#normalize data within each year AND each company size group
+for year in df['السنة'].unique():
+    for size in df[size_column].unique():
+        #create a boolean mask for the current year and company size segment
+        mask = (df['السنة'] == year) & (df[size_column] == size)
+        
+        #check if the filtered segment is not empty
+        if not df.loc[mask].empty:
+            for col in columns_to_normalize:
+                min_val = df.loc[mask, col].min()
+                max_val = df.loc[mask, col].max()
+                range_val = max_val - min_val
+                
+                if range_val > 0:
+                    #apply min-max normalization
+                    df.loc[mask, f"{col}_normalized"] = (df.loc[mask, col] - min_val) / range_val
+                else:
+                    #all values in the segment are the same then value = 0
+                    df.loc[mask, f"{col}_normalized"] = 0
+
+#calculate the final weighted score
 def calculate_normalized_score(row):
     sector = row["القطاع"]
     if sector in weights:
@@ -69,7 +79,6 @@ def calculate_normalized_score(row):
         normalized_cols = [f"{c}_normalized" for c in columns_to_normalize]
         for col, weight in zip(normalized_cols, sector_weights):
             score += row[col] * weight
-        # The score is now between 0 and 1. Scale it to be out of 5.
         return round(score * 10, 2)
     return None
 
@@ -80,7 +89,6 @@ normalized_cols_to_drop = [f"{c}_normalized" for c in columns_to_normalize]
 output_df = df.drop(columns=normalized_cols_to_drop)
 output_df.to_csv(output_path, index=False, encoding='utf-8-sig')
 
-
-print(f"Scores calculated correctly and saved to {output_path}")
+print(f"Scores calculated correctly using segmented normalization and saved to {output_path}")
 print("\nScore statistics:")
 print(df['score'].describe())
