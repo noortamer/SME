@@ -1,10 +1,38 @@
 import pandas as pd
+import numpy as np
 
-# Load the data from the specified file path
 file_path = r"data\مؤشرات_الشركة_سنوياً_ar.csv"
 df = pd.read_csv(file_path)
 
-# Define the weights for different sectors
+companies_file_path = r"data\الشركات_ar.csv"
+companies_df = pd.read_csv(companies_file_path)
+
+df.rename(columns={'branches': 'الفروع'}, inplace=True)
+
+company_info = companies_df[['الرقم_الضريبي', 'start_year']]
+df = pd.merge(df, company_info, on='الرقم_الضريبي', how='left')
+
+
+df['start_year'].fillna(df['السنة'], inplace=True)
+df['عمر_المنشأة'] = (df['السنة'] - df['start_year']) + 1
+df['عمر_المنشأة'] = df['عمر_المنشأة'].apply(lambda x: max(x, 1))
+df.drop(columns=['start_year'], inplace=True)
+
+df = df.sort_values(by=['الرقم_الضريبي', 'السنة']).reset_index(drop=True)
+
+df['نمو_المبيعات'] = df.groupby('الرقم_الضريبي')['المبيعات_جنيه'].pct_change()
+df['نمو_الموظفين'] = df.groupby('الرقم_الضريبي')['الموظفون'].pct_change()
+
+denominator = df['رأس_المال_المدفوع_جنيه'].replace(0, np.nan)
+df['العائد_على_رأس_المال'] = df['الإيرادات_جنيه'] / denominator
+
+df['نمو_المبيعات'].fillna(0, inplace=True)
+df['نمو_الموظفين'].fillna(0, inplace=True)
+df.replace([np.inf, -np.inf], 0, inplace=True)
+df['العائد_على_رأس_المال'].fillna(0, inplace=True)
+
+
+
 weights = {
     "الزراعة والحراجة وصيد الأسماك": [0.12, 0.10, 0.20, 0.08, 0.20, 0.20, 0.10],
     "التعدين واستغلال المحاجر": [0.18, 0.10, 0.12, 0.06, 0.18, 0.28, 0.08],
@@ -35,15 +63,18 @@ for sector in weights:
     if total_weight > 0:
         weights[sector] = [w / total_weight for w in weights[sector]]
 
+# List of columns to normalize, with all Arabic names
+# Corresponds to: SL, SG, E, EG, AGE, RC, BR
 columns_to_normalize = [
     "المبيعات_جنيه",
-    "الإيرادات_جنيه",
+    "نمو_المبيعات",
     "الموظفون",
-    "رأس_المال_المدفوع_جنيه",
-    "ضريبة_القيمة_المضافة_المتوقعة",
-    "ضريبة_القيمة_المضافة_المصرح_بها",
-    "branches",
+    "نمو_الموظفين",
+    "عمر_المنشأة",
+    "العائد_على_رأس_المال",
+    "الفروع",
 ]
+
 
 for col in columns_to_normalize:
     df[f"{col}_normalized"] = 0.0
@@ -85,9 +116,16 @@ def calculate_normalized_score(row):
 
 df["score"] = df.apply(calculate_normalized_score, axis=1)
 
-output_path = r"data\scores.csv"
+
+
+output_path = r"data\scores_peers.csv"
 normalized_cols_to_drop = [f"{c}_normalized" for c in columns_to_normalize]
 output_df = df.drop(columns=normalized_cols_to_drop)
+
+numeric_cols = output_df.select_dtypes(include=np.number).columns
+for col in numeric_cols:
+    output_df[col] = output_df[col].round(2)
+
 output_df.to_csv(output_path, index=False, encoding='utf-8-sig')
 
 print(f"Scores calculated correctly using segmented normalization and saved to {output_path}")
