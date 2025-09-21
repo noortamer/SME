@@ -2,7 +2,7 @@
 import pandas as pd
 import numpy as np
 
-INPUT = r"data\scores_peers.csv"
+INPUT = r"data\finalscores.csv"
 OUTPUT = r"data\company_benchmarks.csv"
 
 # Read scores (expects columns: 'القطاع' (sector), 'السنة' (year), 'score')

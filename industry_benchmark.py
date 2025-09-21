@@ -1,7 +1,7 @@
 # industry_benchmark.py
 import pandas as pd
 
-INPUT = r"data\scores_peers.csv"
+INPUT = r"data\finalscores.csv"
 OUTPUT = r"data\industry_benchmarks.csv"
 
 df = pd.read_csv(INPUT, encoding="utf-8-sig")
