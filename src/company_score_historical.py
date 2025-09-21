@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 
-file_path = r"data\scores_peers.csv"
+file_path = r"data\finalscores.csv"
 df = pd.read_csv(file_path)
 
 df = df.sort_values(by=['الرقم_الضريبي', 'السنة']).reset_index(drop=True)
