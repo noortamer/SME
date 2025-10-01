@@ -18,7 +18,7 @@ df['sales_yoy_growth'] = df[growth_col]
 
 df = df.merge(industry_trends[[sector_col, year_col, 'industry_yoy_change']], on=[sector_col, year_col], how='left')
 df = df.rename(columns={'industry_yoy_change': 'industry_avg_yoy_growth'})
-
+ 
 df = df.merge(company_benchmarks[[tax_id_col, year_col, 'z_within_industry_year', sme_col]], on=[tax_id_col, year_col, sme_col], how='left')
 
 df['spike_anomaly'] = np.where((df['sales_yoy_growth'] > 5.0) & (df['z_within_industry_year'] > 2), 1, 0)
