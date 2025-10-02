@@ -1,148 +1,217 @@
-# company_anomalies.py  —  robust Step 4 implementation
+# -*- coding: utf-8 -*-
 import pandas as pd
 import numpy as np
 
-# ---------------- I/O ----------------
-INPUT_YEARLY = r"data/مؤشرات_الشركة_سنوياً_ar.csv"   # yearly panel
-INPUT_COMPANIES = r"data/الشركات_ar.csv"             # master (for names)
-OUTPUT = r"data/company_anomalies.csv"
+IN_PATH  = r"data\new_scores_with_inflation.csv"   # CPI-adjusted file
+OUT_PATH = r"data\new_anomaly_detection_results.csv"
+MIN_CLASS = 10
 
-# ---------------- Config (tunable) ----------------
-MIN_GROUP = 8  # need at least this many peers to use size-split; otherwise fall back to sector×year
+SECTOR_ICT         = "المعلومات والاتصالات"
+SECTOR_AGRICULTURE = "الزراعة والحراجة وصيد الأسماك"
+SECTOR_MINING      = "التعدين واستغلال المحاجر"
 
-# Sector-specific thresholds (as agreed)
-SECTOR_RULES = {
-    "المعلومات والاتصالات": {"yoy_abs": 2.0, "yoy_pct": 0.95, "rc_lo": 0.10},
-    "الأنشطة المالية وأنشطة التأمين": {"yoy_abs": 2.0, "yoy_pct": 0.95, "rc_lo": 0.10},
-    "الصناعة التحويلية": {"yoy_abs": 0.30, "yoy_pct": 0.90, "rc_lo": 0.15},
-    "التشييد والبناء": {"yoy_abs": 0.30, "yoy_pct": 0.90, "rc_lo": 0.15},
-    "تجارة الجملة والتجزئة؛ إصلاح المركبات ذات المحركات والدراجات النارية": {"yoy_abs": 3.0, "yoy_pct": 0.99, "rc_lo": 0.10},
-    "الزراعة والحراجة وصيد الأسماك": {"yoy_abs": 3.0, "yoy_pct": 0.99, "rc_lo": 0.10},
-    "أنشطة الإقامة وخدمات الطعام": {"yoy_abs": 2.0, "yoy_pct": 0.95, "rc_lo": 0.10},
-    "_default": {"yoy_abs": 2.0, "yoy_pct": 0.95, "rc_lo": 0.10},
-}
+df = pd.read_csv(IN_PATH, encoding="utf-8-sig")
+df.columns = df.columns.str.strip()
 
-def rules_for(sec: str) -> dict:
-    return SECTOR_RULES.get(sec, SECTOR_RULES["_default"])
-
-def to_num(x):
-    """robust numeric cast: remove commas/extra chars then to_numeric"""
-    s = pd.Series(x).astype(str).str.replace(r"[^\d\.-]", "", regex=True)
-    return pd.to_numeric(s, errors="coerce")
-
-def pct_rank(series: pd.Series) -> pd.Series:
-    """percentile rank within group; neutral 0.5 if no variation"""
-    s = series.copy()
-    s = s.fillna(s.median())
-    if s.nunique(dropna=False) <= 1:
-        return pd.Series(0.5, index=s.index)
-    return s.rank(pct=True, method="average")
-
-# ---------------- Load & clean ----------------
-df = pd.read_csv(INPUT_YEARLY, encoding="utf-8-sig")
-df.columns = df.columns.str.strip()  # kill hidden spaces
-
-# sanity check required columns
-REQUIRED = ["الرقم_الضريبي", "السنة", "القطاع", "المبيعات_جنيه", "الإيرادات_جنيه", "الموظفون", "رأس_المال_المدفوع_جنيه"]
-missing = [c for c in REQUIRED if c not in df.columns]
+need = ["الرقم_الضريبي","السنة","القطاع",
+        "المبيعات_حقيقي","النمو_الحقيقي_للمبيعات",
+        "الموظفون","رأس_المال_المدفوع_جنيه","العائد_على_رأس_المال"]
+missing = [c for c in need if c not in df.columns]
 if missing:
-    raise ValueError(f"Missing required columns: {missing}\nHave: {df.columns.tolist()}")
+    raise ValueError(f"Missing required columns: {missing}")
 
-# numeric coercion
-df["السنة"] = to_num(df["السنة"])
-for c in ["المبيعات_جنيه","الإيرادات_جنيه","الموظفون","رأس_المال_المدفوع_جنيه"]:
-    df[c] = to_num(df[c])
+# Numerics
+for c in ["السنة","المبيعات_حقيقي","النمو_الحقيقي_للمبيعات",
+          "الموظفون","رأس_المال_المدفوع_جنيه","العائد_على_رأس_المال"]:
+    df[c] = pd.to_numeric(df[c], errors="coerce")
 
-# drop rows without id/year/sales
-df = df.dropna(subset=["الرقم_الضريبي","السنة","المبيعات_جنيه"]).copy()
+# Avoid division by zero artifacts
+df["الموظفون"] = df["الموظفون"].replace(0, np.nan)
+df["رأس_المال_المدفوع_جنيه"] = df["رأس_المال_المدفوع_جنيه"].replace(0, np.nan)
 
-# merge company names (optional but nice)
-try:
-    comp = pd.read_csv(INPUT_COMPANIES, encoding="utf-8-sig")
-    comp.columns = comp.columns.str.strip()
-    if "الرقم_الضريبي" in comp.columns and "اسم_الشركة" in comp.columns:
-        df = df.merge(comp[["الرقم_الضريبي","اسم_الشركة"]], on="الرقم_الضريبي", how="left")
-except FileNotFoundError:
-    pass  # proceed without names
+# Real Sales per Employee
+df["مبيعات_لكل_موظف"] = df["المبيعات_حقيقي"] / df["الموظفون"]
 
-# ---------------- Aggregate duplicates per (id, year) BEFORE YoY ----------------
-# sum sales & revenue; take first for categorical fields
-agg_map = {
-    "المبيعات_جنيه": "sum",
-    "الإيرادات_جنيه": "sum",
-    "الموظفون": "sum",  # if multiple branches reported separately, sum staff
-    "رأس_المال_المدفوع_جنيه": "sum",
-    "القطاع": "first",
-    "فئة_SME": "first",
-    "اسم_الشركة": "first",
+# Choose peer group: (year, sector, class) if big enough; else (year, sector)
+has_class = "الفرع_كود" in df.columns
+if has_class:
+    class_counts = df.groupby(["السنة","القطاع","الفرع_كود"])["الرقم_الضريبي"].transform("nunique")
+    use_class = class_counts >= MIN_CLASS
+else:
+    use_class = pd.Series(False, index=df.index)
+
+def winsorize_in_group(series, lower=0.01, upper=0.99):
+    ql = series.quantile(lower)
+    qu = series.quantile(upper)
+    return series.clip(ql, qu)
+
+def transform_group(col, fn, by_class=True):
+    if has_class and by_class:
+        v_class  = df.groupby(["السنة","القطاع","الفرع_كود"], dropna=False)[col].transform(fn)
+        v_sector = df.groupby(["السنة","القطاع"], dropna=False)[col].transform(fn)
+        out = np.where(use_class, v_class, v_sector)
+        return pd.Series(out, index=df.index)
+    else:
+        return df.groupby(["السنة","القطاع"], dropna=False)[col].transform(fn)
+
+# Winsorized series for stable thresholds
+for metric in ["المبيعات_حقيقي","مبيعات_لكل_موظف","الموظفون",
+               "رأس_المال_المدفوع_جنيه","العائد_على_رأس_المال"]:
+    df[f"{metric}__w"] = transform_group(metric, lambda s: winsorize_in_group(s), by_class=True)
+
+# Z-score on real sales (winsorized)
+mu = transform_group("المبيعات_حقيقي__w", "mean", by_class=True)
+sd = transform_group("المبيعات_حقيقي__w", "std",  by_class=True)
+z = (df["المبيعات_حقيقي__w"] - mu) / sd.replace(0, np.nan)
+df["z_within_industry_year"] = z.fillna(0.0)
+df["z_valid"] = (~sd.isna() & (sd > 0)).astype(int)  # audit
+
+# Percentile thresholds on winsorized series
+def q(pct): return pct/100.0
+P_DEF = {
+    "مبيعات_لكل_موظف__w": [10, 20, 97.5, 99, 99.5],
+    "الموظفون__w":         [10, 20, 90, 95],
+    "رأس_المال_المدفوع_جنيه__w": [90, 95],
+    "العائد_على_رأس_المال__w":  [5, 10, 15, 25],
 }
-# keep only columns present
-agg_map = {k:v for k,v in agg_map.items() if k in df.columns}
+for col, plist in P_DEF.items():
+    for p in plist:
+        colp = f"{col}_p{p}"
+        if has_class:
+            v_class  = df.groupby(["السنة","القطاع","الفرع_كود"], dropna=False)[col].transform("quantile", q(p))
+            v_sector = df.groupby(["السنة","القطاع"], dropna=False)[col].transform("quantile", q(p))
+            df[colp] = np.where(use_class, v_class, v_sector)
+        else:
+            df[colp] = df.groupby(["السنة","القطاع"], dropna=False)[col].transform("quantile", q(p))
 
-df_agg = (
-    df.groupby(["الرقم_الضريبي","السنة"], as_index=False)
-      .agg(agg_map)
+# ---------------- RULES (same business logic) ----------------
+SECT = df["القطاع"]
+
+# R1: Sales spike
+r1_growth = np.where(SECT.eq(SECTOR_ICT), 6.0,
+             np.where(SECT.eq(SECTOR_AGRICULTURE), 2.5,
+             np.where(SECT.eq(SECTOR_MINING), 5.0, 4.0)))
+r1_z = np.where(SECT.eq(SECTOR_ICT), 3.5,
+        np.where(SECT.eq(SECTOR_AGRICULTURE), 2.5,
+        np.where(SECT.eq(SECTOR_MINING), 3.0, 3.0)))
+R1 = (
+    (df["النمو_الحقيقي_للمبيعات"] >= r1_growth) &
+    (df["ز_within_industry_year" if False else "z_within_industry_year"] >= r1_z) &
+    (pd.to_numeric(df.get("نمو_الموظفين", np.nan), errors="coerce") <= 0.20)
+).astype(int)
+
+# R2: High sales + low employees
+r2_hi = np.where(SECT.eq(SECTOR_ICT),
+                 df["مبيعات_لكل_موظف__w_p99.5"],
+                 df["مبيعات_لكل_موظف__w_p99"])
+R2 = (
+    (df["مبيعات_لكل_موظف"] >= r2_hi) &
+    (df["الموظفون"]        <= df["الموظفون__w_p10"]) &
+    (df["z_within_industry_year"] >= 2.5)
+).astype(int)
+
+# R3: High employees + low sales
+R3 = (
+    (df["الموظفون"]        >= df["الموظفون__w_p95"]) &
+    (df["مبيعات_لكل_موظف"] <= df["مبيعات_لكل_موظف__w_p10"]) &
+    (df["النمو_الحقيقي_للمبيعات"] <= 0.10)
+).astype(int)
+
+# R4: High capital + poor utilization (sector-specific ROC threshold only)
+r4_roc_low = np.where(SECT.eq(SECTOR_MINING),
+                      df["العائد_على_رأس_المال__w_p5"],
+                      df["العائد_على_رأس_المال__w_p10"])
+R4 = (
+    (df["رأس_المال_المدفوع_جنيه"] >= df["رأس_المال_المدفوع_جنيه__w_p95"]) &
+    (df["العائد_على_رأس_المال"]   <= r4_roc_low) &
+    (df["النمو_الحقيقي_للمبيعات"].abs() <= 0.05)
+).astype(int)
+
+# Sensitive variants
+s1_growth = np.where(SECT.eq(SECTOR_ICT), 3.5,
+             np.where(SECT.eq(SECTOR_AGRICULTURE), 1.5,
+             np.where(SECT.eq(SECTOR_MINING), 3.0, 2.0)))
+s1_z = np.where(SECT.eq(SECTOR_ICT), 2.5,
+         np.where(SECT.eq(SECTOR_AGRICULTURE), 1.5,
+         np.where(SECT.eq(SECTOR_MINING), 2.0, 2.0)))
+S1 = (
+    (df["النمو_الحقيقي_للمبيعات"] >= s1_growth) &
+    (df["z_within_industry_year"]  >= s1_z) &
+    (pd.to_numeric(df.get("نمو_الموظفين", np.nan), errors="coerce") <= 0.30)
+).astype(int)
+
+s2_hi = np.where(SECT.eq(SECTOR_ICT),
+                 df["مبيعات_لكل_موظف__w_p99"],
+                 df["مبيعات_لكل_موظف__w_p97.5"])
+S2 = (
+    (df["مبيعات_لكل_موظف"] >= s2_hi) &
+    (df["الموظفون"]        <= df["الموظفون__w_p20"]) &
+    (df["z_within_industry_year"] >= 2.0)
+).astype(int)
+
+S3 = (
+    (df["الموظفون"]        >= df["الموظفون__w_p90"]) &
+    (df["مبيعات_لكل_موظف"] <= df["مبيعات_لكل_موظف__w_p20"])
+).astype(int)
+
+s4_roc_low = np.where(SECT.eq(SECTOR_MINING),
+                      df["العائد_على_رأس_المال__w_p15"],
+                      df["العائد_على_رأس_المال__w_p25"])
+S4 = (
+    (df["رأس_المال_المدفوع_جنيه"] >= df["رأس_المال_المدفوع_جنيه__w_p90"]) &
+    (df["العائد_على_رأس_المال"]   <= s4_roc_low) &
+    (df["النمو_الحقيقي_للمبيعات"].abs() <= 0.10)
+).astype(int)
+
+# Collect rule flags
+df["R1"], df["R2"], df["R3"], df["R4"] = R1, R2, R3, R4
+df["S1"], df["S2"], df["S3"], df["S4"] = S1, S2, S3, S4
+df["conservative_anomaly"] = (df[["R1","R2","R3","R4"]].sum(axis=1) > 0).astype(int)
+df["sensitive_anomaly"]    = (df[["S1","S2","S3","S4"]].sum(axis=1) > 0).astype(int)
+df["عدد_القواعد_R"] = df[["R1","R2","R3","R4"]].sum(axis=1)
+df["عدد_القواعد_S"] = df[["S1","S2","S3","S4"]].sum(axis=1)
+
+# ---------------- NEW: Multi-year consistency flag ----------------
+# Flag if the same company trips any rule in >= 2 consecutive years
+df = df.sort_values(["الرقم_الضريبي","السنة"])
+any_rule = (
+    (df[["R1","R2","R3","R4","S1","S2","S3","S4"]].sum(axis=1) > 0).astype(int)
 )
-
-# ---------------- Compute YoY per company ----------------
-df_agg = df_agg.sort_values(["الرقم_الضريبي","السنة"])
-df_agg["sales_yoy"] = df_agg.groupby("الرقم_الضريبي")["المبيعات_جنيه"].pct_change()
-
-# ---------------- Derive RC and prep for peer ranking ----------------
-df_agg["rc"] = df_agg["الإيرادات_جنيه"] / df_agg["رأس_المال_المدفوع_جنيه"].replace(0, np.nan)
-df_agg.replace([np.inf, -np.inf], np.nan, inplace=True)
-
-# ---------------- Percentiles vs peers ----------------
-# Use size-aware grouping only if every size subgroup in (sector×year) has >= MIN_GROUP
-use_size = "فئة_SME" in df_agg.columns
-
-def group_keys_for_chunk(chunk: pd.DataFrame):
-    if use_size:
-        counts = chunk.groupby("فئة_SME")["المبيعات_جنيه"].count()
-        if (counts >= MIN_GROUP).all():
-            return ["القطاع","السنة","فئة_SME"]
-    return ["القطاع","السنة"]
-
-df_agg[["p_المبيعات_جنيه","p_الموظفون","p_rc","p_sales_yoy","group_n"]] = np.nan
-
-for (sec, yr), chunk in df_agg.groupby(["القطاع","السنة"], dropna=False):
-    keys = group_keys_for_chunk(chunk)
-    for _, sub in chunk.groupby(keys, dropna=False):
-        idx = sub.index
-        df_agg.loc[idx, "group_n"] = len(sub)
-        df_agg.loc[idx, "p_المبيعات_جنيه"] = pct_rank(sub["المبيعات_جنيه"])
-        df_agg.loc[idx, "p_الموظفون"]     = pct_rank(sub["الموظفون"])
-        df_agg.loc[idx, "p_rc"]            = pct_rank(sub["rc"])
-        df_agg.loc[idx, "p_sales_yoy"]     = pct_rank(sub["sales_yoy"])
-
-# ---------------- Apply anomaly rules ----------------
-def apply_rules(row):
-    r = rules_for(row["القطاع"])
-    flag_spike = (pd.notna(row["p_sales_yoy"]) and row["p_sales_yoy"] >= r["yoy_pct"]) \
-                 or (pd.notna(row["sales_yoy"]) and row["sales_yoy"] >= r["yoy_abs"])
-    return pd.Series({
-        "flag_sales_spike_yoy": bool(flag_spike),
-        "flag_high_sales_low_emp": bool((row.get("p_المبيعات_جنيه",np.nan) >= 0.90) and (row.get("p_الموظفون",np.nan) <= 0.10)),
-        "flag_high_emp_low_sales": bool((row.get("p_الموظفون",np.nan) >= 0.90) and (row.get("p_المبيعات_جنيه",np.nan) <= 0.10)),
-        "flag_high_cap_stagnant": bool((row.get("p_rc",np.nan) <= r["rc_lo"]) and (pd.isna(row["sales_yoy"]) or row["sales_yoy"] <= 0)),
-        "flag_low_rc": bool(row.get("p_rc",np.nan) <= r["rc_lo"]),
-    })
-
-flags = df_agg.apply(apply_rules, axis=1)
-df_agg = pd.concat([df_agg, flags], axis=1)
-flag_cols = [c for c in df_agg.columns if c.startswith("flag_")]
-df_agg["anomaly_count"] = df_agg[flag_cols].sum(axis=1)
+# consecutive-year trigger per company
+consecutive = any_rule.groupby(df["الرقم_الضريبي"]).apply(lambda s: (s.shift(1) == 1) & (s == 1)).reset_index(level=0, drop=True)
+# Multi-year consistency if ever had a consecutive pair
+df["multi_year_consistency"] = consecutive.groupby(df["الرقم_الضريبي"]).transform(lambda s: 1 if s.any() else 0).astype(int)
 
 # ---------------- Output ----------------
-keep = ["الرقم_الضريبي","اسم_الشركة","السنة","القطاع","فئة_SME",
-        "المبيعات_جنيه","الإيرادات_جنيه","الموظفون","رأس_المال_المدفوع_جنيه",
-        "sales_yoy","rc","group_n","anomaly_count"] + flag_cols
-keep = [c for c in keep if c in df_agg.columns]
+base_cols = [
+    "الرقم_الضريبي","اسم_الشركة","السنة","القطاع",
+    "القسم_كود","المجموع_كود","الفرع_كود",
+    "فئة_SME","سنة_البداية","عمر_المنشأة",
+    "المبيعات_حقيقي","النمو_الحقيقي_للمبيعات",
+    "الموظفون","رأس_المال_المدفوع_جنيه","العائد_على_رأس_المال",
+    "مبيعات_لكل_موظف","z_within_industry_year","z_valid","score"
+]
+base_cols = [c for c in base_cols if c in df.columns]
 
-out = df_agg[keep].sort_values(["السنة","القطاع","anomaly_count"], ascending=[True, True, False])
-out.to_csv(OUTPUT, index=False, encoding="utf-8-sig")
+th_cols = [
+    "مبيعات_لكل_موظف__w_p10","مبيعات_لكل_موظف__w_p20","مبيعات_لكل_موظف__w_p97.5","مبيعات_لكل_موظف__w_p99","مبيعات_لكل_موظف__w_p99.5",
+    "الموظفون__w_p10","الموظفون__w_p20","الموظفون__w_p90","الموظفون__w_p95",
+    "رأس_المال_المدفوع_جنيه__w_p90","رأس_المال_المدفوع_جنيه__w_p95",
+    "العائد_على_رأس_المال__w_p5","العائد_على_رأس_المال__w_p10","العائد_على_رأس_المال__w_p15","العائد_على_رأس_المال__w_p25"
+]
 
-# Quick visibility
-print(f"[OK] Saved company anomalies to {OUTPUT}")
-print("Sample:")
-print(out.head(10))
+rule_cols = ["R1","R2","R3","R4","S1","S2","S3","S4",
+             "conservative_anomaly","sensitive_anomaly",
+             "عدد_القواعد_R","عدد_القواعد_S","multi_year_consistency"]
+
+out = df[base_cols + th_cols + rule_cols]
+out.to_csv(OUT_PATH, index=False, encoding="utf-8-sig")
+
+# Diagnostics
+print("Anomaly detection completed!")
+print(f"Total rows: {len(out)}")
+print(f"Rows with conservative anomalies: {int(out['conservative_anomaly'].sum())}")
+print(f"Rows with sensitive anomalies: {int(out['sensitive_anomaly'].sum())}")
+print(f"Rows with multi-year consistency: {int(out['multi_year_consistency'].sum())}")
+print("Zero-variance groups (z_valid=0) rows:", int((df['z_valid']==0).sum()))
+print("Peer sizes (class>=MIN_CLASS) share:", round(float(use_class.mean())*100,2) if has_class else "No class column")
