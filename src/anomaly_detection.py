@@ -8,7 +8,7 @@ SECTOR_ICT = "المعلومات والاتصالات"
 SECTOR_AGRICULTURE = "الزراعة والحراجة وصيد الأسماك"
 SECTOR_MINING = "التعدين واستغلال المحاجر"
 
-# NaN values in comparisons will evaluate to False, preventing false positives
+# NaN values in comparisons will evaluate to False
 df['الموظفون'] = df['الموظفون'].replace(0, np.nan)
 df['رأس_المال_المدفوع_جنيه'] = df['رأس_المال_المدفوع_جنيه'].replace(0, np.nan)
 
